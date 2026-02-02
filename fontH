@@ -1,0 +1,155 @@
+// fontH - G-code glyph font (single-character programs)
+// Each character: { width, gcode: `...` }
+// - width is in "font units" (same units as the gcode coordinates inside the glyph)
+// - gcode coordinates are assumed to be relative to glyph origin (0,0) baseline.
+// The generator will translate and scale them into final positions.
+
+const CHAR_HEIGHT = 21; // "units-per-em" baseline (match your old model)
+
+// Example glyph set: you will replace/extend these with your full glyph G-code.
+const characters = {
+  'A': {
+    width: 17,
+    gcode: `
+G00 X15.825390 Y8.173146
+G01 Z-0.125000 F100.0
+G03 X15.285743 Y6.979176 Z-0.125000 I2.938621 J-2.047130 F400.000000
+G03 X14.374316 Y2.257228 Z-0.125000 I46.857207 J-11.493275
+G03 X13.897302 Y-2.004084 Z-0.125000 I77.045895 J-10.781926
+G03 X13.816211 Y-4.378025 Z-0.125000 I23.789286 J-2.000967
+G03 X14.169491 Y-6.449212 Z-0.125000 I7.117379 J0.148281
+G03 X14.597558 Y-6.759275 Z-0.125000 I0.428067 J0.140459
+G03 X14.730728 Y-6.742369 Z-0.125000 I-0.000000 J0.532934
+G03 X14.982031 Y-6.660055 Z-0.125000 I-0.516779 J2.002495
+G02 X15.245502 Y-6.577258 Z-0.125000 I0.826677 J-2.169999
+G02 X15.378906 Y-6.560835 Z-0.125000 I0.133404 J-0.533608
+G02 X15.564941 Y-6.622847 Z-0.125000 I0.000000 J-0.310059
+G02 X15.626953 Y-6.746870 Z-0.125000 I-0.093017 J-0.124023
+...
+G00 Z5.000000
+`.trim()
+  },
+
+  ' ': { width: 10, gcode: `` },
+
+  // Fallback
+  '?': { width: 16, gcode: `G00 X0 Y0` }
+};
+
+// Lowercase aliases if you want (optional)
+for (const c of 'abcdefghijklmnopqrstuvwxyz') {
+  if (characters[c.toUpperCase()]) characters[c] = characters[c.toUpperCase()];
+}
+
+function getCharacter(char) {
+  return characters[char] || characters['?'];
+}
+
+function getTextWidth(text, fontSize) {
+  const scale = fontSize / CHAR_HEIGHT;
+  let w = 0;
+  for (const ch of text) w += getCharacter(ch).width * scale;
+  return w;
+}
+
+// --- G-code parsing / transforming ---
+function fmt(n, dp) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return (0).toFixed(dp);
+  return v.toFixed(dp);
+}
+
+function transformGcode(gcodeStr, scale, dx, dy, opts = {}) {
+  const {
+    decimals = 6,
+    normalizeZ = false,
+    zSafe = 5,
+    zEngrave = -0.125,
+    normalizeFeed = false,
+    feedRate = 400
+  } = opts;
+
+  const lines = (gcodeStr || '').split('\n');
+  const out = [];
+
+  for (let raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith(';')) { out.push(line); continue; }
+
+    // Tokenize: split by whitespace, keep words like G02, X1.23, I0.5
+    const parts = line.split(/\s+/);
+    let gWord = null;
+    const words = [];
+
+    for (const p of parts) {
+      const letter = p[0].toUpperCase();
+      const valStr = p.slice(1);
+
+      if (letter === 'G') {
+        gWord = `G${valStr.replace(/^0+/, '') || '0'}`; // normalize G00/G0
+        words.push(gWord);
+        continue;
+      }
+
+      // Non-parameter tokens just pass through
+      if (!'XYZIJF'.includes(letter)) {
+        words.push(p);
+        continue;
+      }
+
+      const v = Number(valStr);
+      if (!Number.isFinite(v)) { words.push(p); continue; }
+
+      if (letter === 'X') {
+        words.push(`X${fmt(dx + v * scale, decimals)}`);
+      } else if (letter === 'Y') {
+        words.push(`Y${fmt(dy + v * scale, decimals)}`);
+      } else if (letter === 'I') {
+        words.push(`I${fmt(v * scale, decimals)}`);
+      } else if (letter === 'J') {
+        words.push(`J${fmt(v * scale, decimals)}`);
+      } else if (letter === 'Z') {
+        if (normalizeZ) {
+          // heuristic: Z >= 0 treated as safe, otherwise engrave depth
+          words.push(`Z${fmt(v >= 0 ? zSafe : zEngrave, decimals)}`);
+        } else {
+          words.push(`Z${fmt(v, decimals)}`);
+        }
+      } else if (letter === 'F') {
+        if (normalizeFeed) {
+          words.push(`F${fmt(feedRate, decimals)}`);
+        } else {
+          // preserve glyph feed if provided
+          words.push(`F${fmt(v, decimals)}`);
+        }
+      }
+    }
+
+    // If cutting move with no feed and normalizeFeed enabled, add F
+    if (normalizeFeed && gWord && (gWord === 'G1' || gWord === 'G01' || gWord === 'G2' || gWord === 'G02' || gWord === 'G3' || gWord === 'G03')) {
+      if (!words.some(w => w.toUpperCase().startsWith('F'))) {
+        words.push(`F${fmt(feedRate, decimals)}`);
+      }
+    }
+
+    out.push(words.join(' '));
+  }
+
+  return out;
+}
+
+// Render one character at a specific placement
+function renderCharGcode(char, fontSize, offsetX, offsetY, opts = {}) {
+  const glyph = getCharacter(char);
+  const scale = fontSize / CHAR_HEIGHT;
+  return transformGcode(glyph.gcode, scale, offsetX, offsetY, opts);
+}
+
+module.exports = {
+  CHAR_HEIGHT,
+  getCharacter,
+  getTextWidth,
+  renderCharGcode,
+  name: 'gcodeFontH'
+};
